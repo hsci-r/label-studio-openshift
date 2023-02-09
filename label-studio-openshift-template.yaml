@@ -1,0 +1,229 @@
+apiVersion: template.openshift.io/v1
+kind: Template
+metadata:
+  name: label-studio-template
+  annotations:
+    openshift.io/display-name: "Label Studio"
+    description: >-
+      Template for deploying a Label Studio instance within OpenShift,
+      with permanent storage and using PostgreSQL for the database
+    iconClass: "icon-codeigniter"
+    tags: "labelstudio,annotation"
+parameters:
+- name: APP_NAME
+  description: Application name used to group resources and form URLs
+  value: label-studio
+  required: true
+- name: LABELSTUDIO_IMAGE
+  description: Docker image to use for Label Studio
+  value: docker.io/heartexlabs/label-studio:1.7.0
+- name: POSTGRESQL_IMAGE
+  description: Docker image to use for PostgreSQL
+  value: docker.io/postgres:15.1
+- name: DATA_STORAGE_SIZE
+  description: Size of the storage claim for Label Studio data
+  value: 10Gi
+  required: true
+- name: DB_STORAGE_SIZE
+  description: Size of the storage claim for PostgreSQL database
+  value: 1Gi
+  required: true
+- name: POSTGRESQL_USER
+  description: PostgreSQL username for the (root) user
+  generate: expression
+  from: '[\w]{10}'
+- name: POSTGRESQL_PASSWORD
+  description: PostgreSQL password for the (root) user
+  generate: expression
+  from: '[\w]{10}'
+- name: POSTGRESQL_DATABASE
+  description: PostgreSQL database name to use for Label Studio data
+  value: labelstudio
+  required: true
+objects:
+- apiVersion: route.openshift.io/v1
+  kind: Route
+  metadata:
+    labels:
+      app: "${APP_NAME}"
+    name: "${APP_NAME}"
+  spec:
+    port:
+      targetPort: 8080-tcp
+    tls:
+      insecureEdgeTerminationPolicy: Redirect
+      termination: edge
+    to:
+      kind: Service
+      name: "${APP_NAME}"
+- apiVersion: v1
+  kind: Service
+  metadata:
+    labels:
+      app: "${APP_NAME}"
+    name: "${APP_NAME}"
+  spec:
+    ports:
+    - name: 8080-tcp
+      port: 8080
+      protocol: TCP
+      targetPort: 8080
+    selector:
+      app: "${APP_NAME}"
+      service: label-studio
+- apiVersion: v1
+  kind: Service
+  metadata:
+    labels:
+      app: "${APP_NAME}"
+    name: "${APP_NAME}-postgresql"
+  spec:
+    ports:
+    - name: postgresql
+      port: 5432
+      protocol: TCP
+      targetPort: 5432
+    selector:
+      app: "${APP_NAME}"
+      service: postgresql
+- apiVersion: apps.openshift.io/v1
+  kind: DeploymentConfig
+  metadata:
+    name: "${APP_NAME}"
+    labels:
+      app: "${APP_NAME}"
+  spec:
+    replicas: 1
+    selector:
+      app: "${APP_NAME}"
+      service: label-studio
+    strategy:
+      type: Recreate
+    template:
+      metadata:
+        labels:
+          app: "${APP_NAME}"
+          service: label-studio
+      spec:
+        containers:
+        - env:
+          - name: DJANGO_DB
+            value: default
+          - name: POSTGRE_USER
+            valueFrom:
+              secretKeyRef:
+                name: "${APP_NAME}"
+                key: POSTGRESQL_USER
+          - name: POSTGRE_PORT
+            value: "5432"
+          - name: POSTGRE_HOST
+            value: "${APP_NAME}-postgresql"
+          - name: POSTGRE_NAME
+            value: "${POSTGRESQL_DATABASE}"
+          - name: POSTGRE_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: "${APP_NAME}"
+                key: POSTGRESQL_PASSWORD
+          image: "${LABELSTUDIO_IMAGE}"
+          imagePullPolicy: Always
+          name: label-studio
+          ports:
+          - containerPort: 8080
+            protocol: TCP
+          volumeMounts:
+          - mountPath: /label-studio/data
+            name: data
+        volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: "${APP_NAME}-data"
+    triggers:
+    - type: ConfigChange
+- apiVersion: apps.openshift.io/v1
+  kind: DeploymentConfig
+  metadata:
+    labels:
+      app: "${APP_NAME}"
+    name: postgresql
+  spec:
+    replicas: 1
+    selector:
+      app: "${APP_NAME}"
+      service: postgresql
+    strategy:
+      type: Recreate
+    template:
+      metadata:
+        labels:
+          app: "${APP_NAME}"
+          service: postgresql
+      spec:
+        containers:
+        - env:
+          - name: POSTGRES_USER
+            valueFrom:
+              secretKeyRef:
+                name: "${APP_NAME}"
+                key: POSTGRESQL_USER
+          - name: POSTGRES_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: "${APP_NAME}"
+                key: POSTGRESQL_PASSWORD
+          - name: POSTGRES_DB
+            value: "${POSTGRESQL_DATABASE}"
+          - name: PGDATA
+            value: /var/lib/postgresql/data/pgdata
+          image: "${POSTGRESQL_IMAGE}"
+          imagePullPolicy: Always
+          name: postgresql
+          ports:
+          - containerPort: 5432
+            protocol: TCP
+          resources:
+            limits:
+              memory: 512Mi
+          volumeMounts:
+          - mountPath: /var/lib/postgresql/data
+            name: data
+        volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: "${APP_NAME}-postgresql-data"
+    triggers:
+    - type: ConfigChange
+- apiVersion: v1
+  kind: PersistentVolumeClaim
+  metadata:
+    labels:
+      app: "${APP_NAME}"
+    name: "${APP_NAME}-data"
+  spec:
+    accessModes:
+    - ReadWriteOnce
+    resources:
+      requests:
+        storage: "${DATA_STORAGE_SIZE}"
+- apiVersion: v1
+  kind: PersistentVolumeClaim
+  metadata:
+    labels:
+      app: "${APP_NAME}"
+    name: "${APP_NAME}-postgresql-data"
+  spec:
+    accessModes:
+    - ReadWriteOnce
+    resources:
+      requests:
+        storage: "${DB_STORAGE_SIZE}"
+- apiVersion: v1
+  kind: Secret
+  type: Opaque
+  metadata:
+    labels:
+      app: "${APP_NAME}"
+    name: "${APP_NAME}"
+  stringData:
+    POSTGRESQL_USER: "${POSTGRESQL_USER}"
+    POSTGRESQL_PASSWORD: "${POSTGRESQL_PASSWORD}"
